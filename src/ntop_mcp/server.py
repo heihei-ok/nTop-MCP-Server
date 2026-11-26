@@ -18,10 +18,12 @@ from .graph import NTopNotebook
 from .knowledge import GUIDES, get_guide
 from .runner import JobManager, NTopRunner
 from .snapshots import (
+    check_unsaved_autosave,
     close_ntop_processes,
     create_snapshot,
     find_open_ntop_processes,
     list_snapshots,
+    reload_notebook_in_gui,
     restore_snapshot,
 )
 
@@ -51,8 +53,10 @@ def _save_notebook_safely(
     overwrite: bool,
     label: str = "edit",
     suffix: str = "_edited",
+    auto_reload_gui: bool = False,
+    force_if_unsaved: bool = False,
 ) -> Dict[str, Any]:
-    """Save modified notebook with timestamped snapshot backup and open-GUI conflict detection."""
+    """Save modified notebook with timestamped snapshot backup, unsaved-change guard, and optional GUI reload."""
     if output_path:
         dest = _config.resolve_path(output_path)
     elif overwrite:
@@ -60,19 +64,46 @@ def _save_notebook_safely(
     else:
         dest = src.with_name(f"{src.stem}{suffix}{src.suffix}")
 
-    snapshot_path = create_snapshot(dest, label=label) if dest.is_file() else None
     open_procs = find_open_ntop_processes(dest)
+    if open_procs and auto_reload_gui and not force_if_unsaved:
+        autosave_check = check_unsaved_autosave(dest)
+        if autosave_check["has_newer_autosave"]:
+            return {
+                "saved": False,
+                "blocked_by_unsaved_changes": True,
+                "open_gui_pids": [p["pid"] for p in open_procs],
+                "autosave": autosave_check,
+                "message": (
+                    f"Aborted save & reload: detected a newer nTop Autosave ({autosave_check['autosave_mtime']}) "
+                    f"than {dest.name} on disk ({autosave_check['disk_mtime']}). Press Ctrl+S in nTop GUI first, "
+                    "or pass force_if_unsaved=True."
+                ),
+            }
+
+    snapshot_path = create_snapshot(dest, label=label) if dest.is_file() else None
     nb.save(dest)
 
     info: Dict[str, Any] = {
+        "saved": True,
         "saved_to": str(dest),
         "snapshot_backup": str(snapshot_path) if snapshot_path else None,
     }
-    if open_procs:
+
+    if auto_reload_gui:
+        if _config.ntop_gui_path and _config.ntop_gui_path.is_file():
+            info["gui_reload"] = reload_notebook_in_gui(
+                _config.ntop_gui_path,
+                dest,
+                force_if_unsaved=True,  # already verified above before writing
+                open_if_not_running=True,
+            )
+        else:
+            info["gui_reload"] = {"reloaded": False, "error": "ntop.exe not found"}
+    elif open_procs:
         info["open_gui_pids"] = [p["pid"] for p in open_procs]
         info["open_gui_warning"] = (
             f"nTop GUI currently has {dest.name} open (PIDs: {[p['pid'] for p in open_procs]}). "
-            "Close the old window without saving and reopen the file (or call open_in_ntop_gui with reload_if_open=True)."
+            "Close the old window without saving and reopen, or pass auto_reload_gui=True to refresh automatically."
         )
     return info
 
@@ -145,13 +176,15 @@ def open_in_ntop_gui(
     notebook_path: str,
     prevent_duplicate: bool = True,
     reload_if_open: bool = False,
+    force_if_unsaved: bool = False,
 ) -> str:
-    """Launch an .ntop notebook in the desktop nTop GUI with duplicate-window protection.
+    """Launch or safely reload an .ntop notebook in the desktop nTop GUI with duplicate-window and unsaved-change protection.
 
     Args:
         notebook_path: Path to the .ntop file.
         prevent_duplicate: If True (default), refuse to open a second window if this file is already open in ntop.exe.
-        reload_if_open: If True, close existing ntop.exe window(s) for this file before reopening cleanly.
+        reload_if_open: If True, safely close existing ntop.exe window(s) for this file (after checking Autosave) and reopen cleanly.
+        force_if_unsaved: Only used with reload_if_open=True; bypasses the Autosave unsaved-change guard.
     """
     if not _config.ntop_gui_path or not _config.ntop_gui_path.is_file():
         return _dump({"error": "nTop GUI executable (ntop.exe) not found. Set NTOP_GUI_PATH."})
@@ -159,30 +192,34 @@ def open_in_ntop_gui(
     if not nb.is_file():
         return _dump({"error": f"Notebook not found: {nb}"})
 
+    if reload_if_open:
+        return _dump(
+            reload_notebook_in_gui(
+                _config.ntop_gui_path,
+                nb,
+                force_if_unsaved=force_if_unsaved,
+                open_if_not_running=True,
+            )
+        )
+
     open_procs = find_open_ntop_processes(nb)
-    closed_pids: List[int] = []
-    if open_procs:
+    if open_procs and prevent_duplicate:
         pids = [int(p["pid"]) for p in open_procs if p.get("pid") is not None]
-        if reload_if_open:
-            closed_pids = close_ntop_processes(pids)
-            time.sleep(1.0)
-        elif prevent_duplicate:
-            return _dump({
-                "launched": False,
-                "already_open": True,
-                "open_pids": pids,
-                "notebook": str(nb),
-                "message": (
-                    f"{nb.name} is already open in nTop GUI (PIDs: {pids}). "
-                    "Pass reload_if_open=True to close and reopen cleanly, or prevent_duplicate=False to open a second window."
-                ),
-            })
+        return _dump({
+            "launched": False,
+            "already_open": True,
+            "open_pids": pids,
+            "notebook": str(nb),
+            "message": (
+                f"{nb.name} is already open in nTop GUI (PIDs: {pids}). "
+                "Pass reload_if_open=True to close and reopen cleanly, or prevent_duplicate=False to open a second window."
+            ),
+        })
 
     proc = subprocess.Popen([str(_config.ntop_gui_path), str(nb)], cwd=str(nb.parent))
     return _dump({
         "launched": True,
         "pid": proc.pid,
-        "closed_previous_pids": closed_pids,
         "executable": str(_config.ntop_gui_path),
         "notebook": str(nb),
     })
@@ -293,25 +330,23 @@ def set_notebook_literal(
     output_path: Optional[str] = None,
     expression: Optional[str] = None,
     overwrite: bool = False,
+    auto_reload_gui: bool = False,
+    force_if_unsaved: bool = False,
 ) -> str:
     """Update a literal value (scalar/real, integer, bool, enum, vector/point, text) inside an .ntop file.
 
     Supports human-friendly unit strings for `real` values such as `"10mm"`, `"2.5cm"`, `"45deg"`,
     or `{"value": 10, "unit": "mm"}` (automatically converted to SI meters/radians + display expression).
-
-    Args:
-        notebook_path: Source .ntop file path.
-        target: Variable name, variable block ID, or leaf block ID.
-        value: New literal value (number, unit string like `"10mm"`, bool, str, or [x, y, z] list).
-        output_path: Optional destination .ntop file path.
-        expression: Optional explicit display expression to set on a variable block (e.g. "500mm").
-        overwrite: If True and output_path is omitted, overwrite notebook_path in place (with timestamped snapshot).
+    Pass `auto_reload_gui=True` to safely close and reopen the nTop GUI window after saving (with Autosave guard).
     """
     try:
         nb_path = _config.resolve_path(notebook_path)
         nb = NTopNotebook.load(nb_path)
         change = nb.set_literal(target=target, value=value, expression=expression)
-        save_info = _save_notebook_safely(nb, nb_path, output_path, overwrite, label="set_literal")
+        save_info = _save_notebook_safely(
+            nb, nb_path, output_path, overwrite, label="set_literal",
+            auto_reload_gui=auto_reload_gui, force_if_unsaved=force_if_unsaved,
+        )
         return _dump({**save_info, "change": change})
     except Exception as exc:
         return _dump({"error": str(exc)})
@@ -514,22 +549,18 @@ def batch_edit_notebook(
     overwrite: bool = False,
     verify_with_ntopcl: bool = False,
     verify_target: Optional[Union[int, str]] = None,
+    auto_reload_gui: bool = False,
+    force_if_unsaved: bool = False,
 ) -> str:
     """Atomically apply multiple graph edits (with `$alias` references) in a single transaction.
 
     All operations run in memory first; the file is only saved if graph validation passes
     (and if `verify_with_ntopcl=True`, only if `ntopcl` evaluates `verify_target` with zero errors).
+    Pass `auto_reload_gui=True` to automatically close the old nTop GUI window (if no unsaved Autosave edits)
+    and reopen the updated file in a single clean window.
 
     Supported `op` types: `add_section`, `add_literal`, `add_block`, `add_variable`,
     `set_literal`, `rewire_input`, `set_output`, `set_visibility`, `promote_to_input`.
-
-    Args:
-        notebook_path: Source .ntop file path.
-        operations: Ordered list of operation dicts (use `"as": "$alias"` to bind new block IDs).
-        output_path: Optional destination .ntop path.
-        overwrite: If True and output_path is omitted, update notebook_path in place (creates snapshot first).
-        verify_with_ntopcl: If True, run `ntopcl` on a temp copy before saving; abort save on error.
-        verify_target: Block ID, block name, or `"$alias"` to evaluate when `verify_with_ntopcl=True`.
     """
     try:
         nb_path = _config.resolve_path(notebook_path)
@@ -552,7 +583,6 @@ def batch_edit_notebook(
                 if isinstance(target_to_eval, str) and target_to_eval in batch_res["aliases"]:
                     target_to_eval = batch_res["aliases"][target_to_eval]
                 elif target_to_eval is None:
-                    # Pick last created alias or notebook output
                     if batch_res["aliases"]:
                         target_to_eval = list(batch_res["aliases"].values())[-1]
                     else:
@@ -572,9 +602,11 @@ def batch_edit_notebook(
                         **batch_res,
                     })
 
-        save_info = _save_notebook_safely(nb, nb_path, output_path, overwrite, label="batch_edit")
+        save_info = _save_notebook_safely(
+            nb, nb_path, output_path, overwrite, label="batch_edit",
+            auto_reload_gui=auto_reload_gui, force_if_unsaved=force_if_unsaved,
+        )
         return _dump({
-            "saved": True,
             **save_info,
             "verification": verify_res,
             **batch_res,
@@ -595,21 +627,10 @@ def set_block_visibility(
     wireframe: Optional[bool] = None,
     output_path: Optional[str] = None,
     overwrite: bool = False,
+    auto_reload_gui: bool = False,
+    force_if_unsaved: bool = False,
 ) -> str:
-    """Control viewport visibility, solo mode, color (`#RRGGBB` or `[r,g,b,a]`), transparency, and opacity.
-
-    Args:
-        notebook_path: Source .ntop file path.
-        targets: List of block IDs or block names to style.
-        visible: Show (`True`) or hide (`False`) the target blocks.
-        solo: If True, hide all other blocks in the viewport so only `targets` are shown.
-        color: Optional hex color (`"#3388ff"`) or `[r, g, b, a]` list.
-        transparent: Optional boolean to toggle transparency.
-        opacity: Optional opacity from `0.0` to `1.0`.
-        wireframe: Optional wireframe toggle.
-        output_path: Optional destination .ntop path.
-        overwrite: If True and output_path is omitted, update in place (creates snapshot first).
-    """
+    """Control viewport visibility, solo mode, color (`#RRGGBB` or `[r,g,b,a]`), transparency, and opacity."""
     try:
         nb_path = _config.resolve_path(notebook_path)
         nb = NTopNotebook.load(nb_path)
@@ -622,8 +643,100 @@ def set_block_visibility(
             opacity=opacity,
             wireframe=wireframe,
         )
-        save_info = _save_notebook_safely(nb, nb_path, output_path, overwrite, label="visibility")
+        save_info = _save_notebook_safely(
+            nb, nb_path, output_path, overwrite, label="visibility",
+            auto_reload_gui=auto_reload_gui, force_if_unsaved=force_if_unsaved,
+        )
         return _dump({**save_info, "result": res})
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+def package_custom_block(
+    notebook_path: str,
+    output_block: Union[int, str],
+    output_path: str,
+    block_name: str,
+    input_targets: Optional[List[Union[int, str]]] = None,
+    description: str = "",
+    prune: bool = True,
+    preserve_existing_uuid: bool = True,
+    verify_with_ntopcl: bool = True,
+) -> str:
+    """Package a notebook branch into a standalone reusable Custom Block `.ntop` for in-place GUI hot-updates.
+
+    When `output_path` already exists and `preserve_existing_uuid=True`, the Custom Block's internal
+    `function` UUID is preserved so re-importing it (`File -> Import -> Custom Block`) inside an
+    already-open parent notebook triggers nTop's native "Update Custom Block" prompt without closing the main window.
+
+    Args:
+        notebook_path: Source `.ntop` file path.
+        output_block: Block ID or unique name to set as the Custom Block's output.
+        output_path: Destination `.ntop` path for the Custom Block.
+        block_name: Display name of the Custom Block in nTop.
+        input_targets: Optional list of variable IDs/names to promote to Custom Block inputs.
+        description: Optional Custom Block description.
+        prune: If True (default), prune blocks unrelated to `output_block`.
+        preserve_existing_uuid: If True and `output_path` exists, preserve its existing `def.function` UUID for hot-update.
+        verify_with_ntopcl: If True (default), run `ntopcl -t` to confirm valid Custom Block inputs & output.
+    """
+    try:
+        nb_path = _config.resolve_path(notebook_path)
+        dest = _config.resolve_path(output_path)
+
+        existing_uuid: Optional[str] = None
+        if preserve_existing_uuid and dest.is_file():
+            try:
+                existing_nb = NTopNotebook.load(dest)
+                existing_uuid = existing_nb.fn.get("def", {}).get("function") or None
+            except Exception:
+                existing_uuid = None
+
+        nb = NTopNotebook.load(nb_path)
+        pkg_res = nb.package_as_custom_block(
+            output_target=output_block,
+            block_name=block_name,
+            input_targets=input_targets,
+            description=description,
+            prune=prune,
+            function_id=existing_uuid,
+        )
+
+        if not pkg_res["validation"]["valid"]:
+            return _dump({"saved": False, "aborted_reason": "Graph validation failed", **pkg_res})
+
+        tpl_res = None
+        if verify_with_ntopcl:
+            with tempfile.TemporaryDirectory(prefix="ntop_cb_verify_") as tmp:
+                tmp_cb = Path(tmp) / dest.name
+                nb.save(tmp_cb)
+                tpl_res = _runner.generate_templates(tmp_cb)
+                if not tpl_res["success"] or tpl_res["errors"]:
+                    return _dump({
+                        "saved": False,
+                        "aborted_reason": "ntopcl -t verification failed for Custom Block",
+                        "template_verification": tpl_res,
+                        **pkg_res,
+                    })
+
+        snap = create_snapshot(dest, label="custom_block") if dest.is_file() else None
+        nb.save(dest)
+        return _dump({
+            "saved": True,
+            "saved_to": str(dest),
+            "snapshot_backup": str(snap) if snap else None,
+            "preserved_existing_uuid": bool(existing_uuid),
+            "template_verification": {
+                "success": tpl_res["success"],
+                "inputs": (tpl_res.get("input_template") or {}).get("inputs", []),
+            } if tpl_res else None,
+            "gui_hot_update_hint": (
+                "In your open nTop main window, use File -> Import -> Custom Block (or Imports tab -> Import Block) "
+                f"and select {dest.name} to trigger nTop's in-place 'Update' prompt without closing your main window."
+            ),
+            **pkg_res,
+        })
     except Exception as exc:
         return _dump({"error": str(exc)})
 
@@ -636,6 +749,8 @@ def promote_to_input(
     description: str = "",
     output_path: Optional[str] = None,
     overwrite: bool = False,
+    auto_reload_gui: bool = False,
+    force_if_unsaved: bool = False,
 ) -> str:
     """Promote an existing notebook variable (`core.var<...>`) into a Notebook Input (`def.inputs`).
 
@@ -645,7 +760,10 @@ def promote_to_input(
         nb_path = _config.resolve_path(notebook_path)
         nb = NTopNotebook.load(nb_path)
         res = nb.promote_to_input(target=target, input_name=input_name, description=description)
-        save_info = _save_notebook_safely(nb, nb_path, output_path, overwrite, label="promote_input")
+        save_info = _save_notebook_safely(
+            nb, nb_path, output_path, overwrite, label="promote_input",
+            auto_reload_gui=auto_reload_gui, force_if_unsaved=force_if_unsaved,
+        )
         return _dump({**save_info, "result": res})
     except Exception as exc:
         return _dump({"error": str(exc)})
@@ -663,18 +781,37 @@ def list_notebook_snapshots(notebook_path: str) -> str:
 
 
 @mcp.tool()
-def undo_notebook_edit(notebook_path: str, snapshot_name: Optional[str] = None) -> str:
+def undo_notebook_edit(
+    notebook_path: str,
+    snapshot_name: Optional[str] = None,
+    auto_reload_gui: bool = False,
+    force_if_unsaved: bool = False,
+) -> str:
     """Restore an .ntop notebook from its latest (or named) snapshot in `.ntop_history/`.
 
     Saves the current state as a `before_undo` snapshot first so undo is itself reversible.
     """
     try:
         nb_path = _config.resolve_path(notebook_path)
-        res = restore_snapshot(nb_path, snapshot_name=snapshot_name)
         open_procs = find_open_ntop_processes(nb_path)
-        if open_procs:
+        if open_procs and auto_reload_gui and not force_if_unsaved:
+            autosave_check = check_unsaved_autosave(nb_path)
+            if autosave_check["has_newer_autosave"]:
+                return _dump({
+                    "restored": False,
+                    "blocked_by_unsaved_changes": True,
+                    "open_gui_pids": [p["pid"] for p in open_procs],
+                    "autosave": autosave_check,
+                    "message": "Detected unsaved GUI edits in Autosave; save or pass force_if_unsaved=True.",
+                })
+        res = restore_snapshot(nb_path, snapshot_name=snapshot_name)
+        if auto_reload_gui and _config.ntop_gui_path and _config.ntop_gui_path.is_file():
+            res["gui_reload"] = reload_notebook_in_gui(
+                _config.ntop_gui_path, nb_path, force_if_unsaved=True, open_if_not_running=True
+            )
+        elif open_procs:
             res["open_gui_pids"] = [p["pid"] for p in open_procs]
-            res["open_gui_warning"] = "Reopen the file in nTop GUI to see the restored state."
+            res["open_gui_warning"] = "Reopen the file in nTop GUI (or pass auto_reload_gui=True) to see the restored state."
         return _dump(res)
     except Exception as exc:
         return _dump({"error": str(exc)})

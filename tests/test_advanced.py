@@ -16,7 +16,7 @@ from ntop_mcp.config import NTopConfig
 from ntop_mcp.container import MagicSection, NTopContainer, NTopFnSection, ObjContainer
 from ntop_mcp.graph import NTopNotebook
 from ntop_mcp.runner import NTopRunner
-from ntop_mcp.snapshots import create_snapshot, list_snapshots, restore_snapshot
+from ntop_mcp.snapshots import check_unsaved_autosave, create_snapshot, list_snapshots, restore_snapshot
 from ntop_mcp.units import parse_quantity
 
 
@@ -215,6 +215,46 @@ def test_catalog_build_and_search(tmp_path: Path) -> None:
     found = search_catalog(query="boolean_union", catalog_path=cat_path)
     assert found["total_matches"] >= 1
     assert any("boolean_union" in b["func"] for b in found["blocks"])
+
+
+def test_package_custom_block_and_autosave_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = _make_notebook_with_view(tmp_path)
+    nb = NTopNotebook.load(src)
+    pkg = nb.package_as_custom_block(
+        output_target="Wall",
+        block_name="My Wall Block",
+        input_targets=["Wall"],
+        prune=True,
+        function_id="user_func_stable_uuid_1234",
+    )
+    assert pkg["block_name"] == "My Wall Block"
+    assert pkg["function_id"] == "user_func_stable_uuid_1234"
+    assert pkg["total_inputs"] == 1
+    assert pkg["validation"]["valid"] is True
+
+    cb_path = tmp_path / "My_Wall_Block.ntop"
+    nb.save(cb_path)
+    reloaded = NTopNotebook.load(cb_path)
+    assert reloaded.inspect()["title"] == "My Wall Block"
+    assert reloaded.inspect()["function_id"] == "user_func_stable_uuid_1234"
+
+    # Simulate a newer Autosave file in APPDATA
+    fake_appdata = tmp_path / "AppData"
+    autosave_dir = fake_appdata / "nTopology" / "Autosave"
+    autosave_dir.mkdir(parents=True)
+    monkeypatch.setenv("APPDATA", str(fake_appdata))
+
+    # Initially no autosave -> False
+    assert check_unsaved_autosave(src)["has_newer_autosave"] is False
+
+    # Create a newer autosave file -> True
+    newer_auto = autosave_dir / f"{src.stem}.DEADBEEF.ntop"
+    newer_auto.write_bytes(src.read_bytes())
+    future_ts = src.stat().st_mtime + 10.0
+    os.utime(newer_auto, (future_ts, future_ts))
+    res = check_unsaved_autosave(src)
+    assert res["has_newer_autosave"] is True
+    assert res["autosave_path"] == str(newer_auto)
 
 
 def test_live_evaluate_block_promote_and_export_mesh(tmp_path: Path) -> None:

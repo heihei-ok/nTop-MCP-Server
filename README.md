@@ -11,7 +11,8 @@ A Model Context Protocol (MCP) server for **nTop (nTopology)** combining lossles
    - **`set_block_visibility`**: Control viewport show/hide, `solo=True` spotlighting, color (`#RRGGBB` / RGBA), transparency, and opacity.
    - **`promote_to_input`**: Turn GUI variables into Notebook Inputs (`def.inputs`) ready for `ntopcl -j` and `run_parameter_sweep`.
    - **Multi-version Snapshots & Undo**: Automatic timestamped backups under `.ntop_history/` with `list_notebook_snapshots` and `undo_notebook_edit`.
-   - **GUI Conflict Safety**: Detects running `ntop.exe` instances holding the target file and prevents accidental double-window launches (`open_in_ntop_gui`).
+   - **GUI Conflict Safety & Auto-Reload**: Detects running `ntop.exe` instances holding the target file, guards against unsaved GUI edits via nTop's Autosave timestamps, prevents accidental double-window launches (`open_in_ntop_gui`), and supports `auto_reload_gui=True` on edit/undo tools to safely refresh the GUI window in one step.
+   - **In-Place Custom Block Hot-Updates (`package_custom_block`)**: Packages any notebook branch into a reusable Custom Block `.ntop` while preserving its `def.function` UUID across updates, enabling nTop GUI's native `File -> Import -> Custom Block -> Update` workflow without closing the parent notebook.
 
 2. **Verified Block Signature Catalog**
    - **`build_block_catalog`** scans any folder of `.ntop` notebooks to build a local nTop 5.x signature database (`block_catalog.json`).
@@ -22,11 +23,11 @@ A Model Context Protocol (MCP) server for **nTop (nTopology)** combining lossles
    - **`export_block_mesh`**: Non-invasively convert an implicit/mesh block to `.stl`, `.3mf`, or `.obj` via `ntopcl` and automatically inspect volume, surface area, bounding box, and watertightness.
    - **`generate_templates`**, **`run_notebook`**, **`run_notebook_async`** (+ job control), and **`run_parameter_sweep`** (Cartesian grid or DOE sets with CSV summary).
 
-## MCP Tools (35 Tools)
+## MCP Tools (36 Tools)
 
 - **Environment & GUI**: `check_ntop_environment`, `set_workdir`, `list_ntop_files`, `open_in_ntop_gui`
 - **Inspection & Validation**: `inspect_notebook`, `list_notebook_variables`, `read_notebook_graph`, `validate_notebook_graph`
-- **Direct Graph Editing & Snapshots**: `set_notebook_literal`, `set_notebook_output`, `rewire_block_input`, `prune_notebook_graph`, `add_notebook_section`, `add_notebook_literal`, `add_notebook_block`, `add_notebook_variable`, `batch_edit_notebook`, `set_block_visibility`, `promote_to_input`, `list_notebook_snapshots`, `undo_notebook_edit`
+- **Direct Graph Editing, Custom Blocks & Snapshots**: `set_notebook_literal`, `set_notebook_output`, `rewire_block_input`, `prune_notebook_graph`, `add_notebook_section`, `add_notebook_literal`, `add_notebook_block`, `add_notebook_variable`, `batch_edit_notebook`, `set_block_visibility`, `promote_to_input`, `package_custom_block`, `list_notebook_snapshots`, `undo_notebook_edit`
 - **Block Signature Catalog**: `build_block_catalog`, `search_blocks`
 - **Non-Invasive Evaluation & Export**: `evaluate_block`, `export_block_mesh`
 - **nTop Automate & Sweeps**: `generate_templates`, `run_notebook`, `run_notebook_async`, `get_job_status`, `list_jobs`, `cancel_job`, `run_parameter_sweep`

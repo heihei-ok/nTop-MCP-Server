@@ -1370,3 +1370,47 @@ class NTopNotebook:
             "results": results,
             "validation": validation,
         }
+
+    def package_as_custom_block(
+        self,
+        output_target: int | str,
+        block_name: str,
+        input_targets: Optional[List[int | str]] = None,
+        description: str = "",
+        prune: bool = True,
+        function_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Package this notebook (or a pruned branch) as a reusable nTop Custom Block `.ntop`.
+
+        Preserving a stable `function_id` across updates allows nTop GUI's
+        `File -> Import -> Custom Block` workflow to detect the updated version and
+        hot-update the block inside an already-open parent notebook without restarting GUI.
+        """
+        promoted: List[Dict[str, Any]] = []
+        for t in input_targets or []:
+            promoted.append(self.promote_to_input(t))
+
+        out_info = self.set_output(output_target)
+        prune_stats = self.prune_to_output() if prune else None
+
+        fn_def = self.fn.setdefault("def", {})
+        fn_def["displayname"] = block_name
+        if description:
+            fn_def["description"] = description
+        if function_id:
+            fn_def["function"] = function_id
+        elif not fn_def.get("function"):
+            fn_def["function"] = (
+                f"user_func_{uuid.uuid4().hex[:8]}_{uuid.uuid4().hex[:4]}_"
+                f"{uuid.uuid4().hex[:4]}_{uuid.uuid4().hex[:4]}_{uuid.uuid4().hex[:12]}"
+            )
+
+        return {
+            "block_name": block_name,
+            "function_id": fn_def["function"],
+            "output": out_info,
+            "promoted_inputs": promoted,
+            "total_inputs": len(fn_def.get("inputs", [])),
+            "prune_stats": prune_stats,
+            "validation": self.validate(),
+        }
