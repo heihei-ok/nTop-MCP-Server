@@ -63,6 +63,9 @@ Add `ntop` to your MCP config (`mcp_config.json`, Claude Desktop, Cursor, Antigr
         "NTOP_GUI_PATH": "C:\\Program Files\\nTopology\\nTopology\\ntop.exe",
         "NTOP_WORKDIR": "C:\\path\\to\\your\\ntop\\projects"
       }
+    },
+    "ntop-docs": {
+      "url": "https://docs.ntop.com/mcp"
     }
   }
 }
