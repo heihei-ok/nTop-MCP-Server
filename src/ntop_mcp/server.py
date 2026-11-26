@@ -962,7 +962,7 @@ def build_block_catalog(
     """Scan a directory of `.ntop` files recursively to index verified local nTop block signatures.
 
     Args:
-        directory: Folder containing `.ntop` notebooks (e.g. `C:\\Users\\USERA\\Desktop\\NTOP`).
+        directory: Folder containing `.ntop` notebooks (e.g. `C:\\path\\to\\ntop_examples`).
         save_path: Optional output JSON catalog path (defaults to `block_catalog.json` in package root).
         include_custom_blocks: If True, also include `user_func_*` custom blocks.
     """
