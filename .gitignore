@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing & tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local nTop artifacts & machine-specific catalog
+block_catalog.json
+.ntop_history/
+*.bak
+*.log
+*.ntop
+*.stl
+*.3mf
+*.obj
